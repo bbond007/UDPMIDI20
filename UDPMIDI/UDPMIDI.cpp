@@ -14,7 +14,7 @@
 #pragma comment(lib, "Winmm.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "msimg32.lib")
-#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\nTest release : 10/09/2021\n\nBinaryBond007@gmail.com"
+#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\nTest release : 10/18/2021\n\nBinaryBond007@gmail.com"
 #define WM_UDPSOCK_IN (WM_USER + 1)
 #define WM_SHELL_ICO  (WM_USER + 2)
 
