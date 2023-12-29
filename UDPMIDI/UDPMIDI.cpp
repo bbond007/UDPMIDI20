@@ -10,49 +10,58 @@
 #include <string.h>
 #include <wingdi.h>
 #include "resource.h"
+#include "atlstr.h"
+
 #pragma comment(lib, "ComCtl32.lib")
 #pragma comment(lib, "Winmm.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "msimg32.lib")
-#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\nTest release : 10/18/2021\n\nBinaryBond007@gmail.com"
+#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\n2.1 release : 12/28/2023\n\nBinaryBond007@gmail.com"
 #define WM_UDPSOCK_IN (WM_USER + 1)
 #define WM_SHELL_ICO  (WM_USER + 2)
 
-/* http://midi.teragonaudio.com/tech/lowmidi.htm */
-static char MT32_Message[] = "<-UDPMIDI  VER 2.0->>";
-static struct       sockaddr_in SenderAddr;
-static struct       sockaddr_in OLDSenderAddr;
-static struct       sockaddr_in client_addr;
-static HICON        hIcon;
-static HWND         hwndComboBoxMIDIDevice;
-static HWND         hwndEditPacketsRX;
-static HWND         hwndEditPacketsTX;
-static HWND         hwndEditUDPPort;
-static HWND         hwndEditLastErr;
-static HWND         hwndEditLastErrStr;
-static HWND         hwndEditLastErrLbl;
-static HWND         hwndEditSenderIP;
-static HMIDIOUT     handMIDIOut     = 0;
-static HMIDIIN      handMIDIIn      = 0;
-static unsigned int RXCount         = 0;
-static unsigned int TXCount         = 0;
-static HANDLE       handUDPinThread = 0;
-static SOCKET       listenerSocket  = INVALID_SOCKET;
-static SOCKET       clientSocket    = INVALID_SOCKET;
-static int          SenderAddrSize  = sizeof(SenderAddr);
 
-void SetEditBoxINT(HWND hwnd, int val)
+static struct        sockaddr_in SenderAddr;
+static struct        sockaddr_in OLDSenderAddr;
+static struct        sockaddr_in client_addr;
+static HICON         hIcon;
+static HWND          hwndComboBoxMIDIOutDevice;
+static HWND          hwndComboBoxMIDIInDevice;
+static HWND          hwndEditPacketsRX;
+static HWND          hwndEditPacketsTX;
+static HWND          hwndEditUDPPort;
+static HWND          hwndEditLastErr;
+static HWND          hwndEditLastErrStr;
+static HWND          hwndEditLastErrLbl;
+static HWND          hwndEditSenderIP;
+static HMIDIOUT      handMIDIOut               = 0;
+static HMIDIIN       handMIDIIn                = 0;
+static unsigned int  RXCount                   = 0;
+static unsigned int  TXCount                   = 0;
+static HANDLE        handUDPinThread           = 0;
+static SOCKET        listenerSocket            = INVALID_SOCKET;
+static SOCKET        clientSocket              = INVALID_SOCKET;
+static int           SenderAddrSize            = sizeof(SenderAddr);
+static bool          bAddBuffer                = true;
+static char          MT32_Message[]            = "<-UDPMIDI  VER 2.1->";
+static char          defaultClientDeviceName[] = "mt32-pi";
+static char          ClientDeviceName[30];
+static MIDIHDR	     midiInHdr;
+static unsigned char SysXBuffer[2048];
+
+
+static void SetEditBoxINT(HWND hwnd, int val)
 {
     char buf[11];
     wchar_t text_wchar[0xff]; 
-    //memset(buf, 0x00, sizeof(buf)); // ok compiler worning, i don't think this is necessacary, but whatever. 
+    //memset(buf, 0x00, sizeof(buf)); // ok compiler warning, i don't think this is necessacary, but whatever. 
     _itoa_s(val, buf, 11);
     size_t length = strlen(buf);      // TODO --> C6054 : string buf might not be 0 terminated? ok
     mbstowcs_s(&length, text_wchar, buf, length);
     SendMessage(hwnd, (UINT)WM_SETTEXT, (WPARAM)0, (LPARAM)text_wchar);
 }
 
-void SetEditBoxTXT(HWND hwnd, const char * val)
+static void SetEditBoxTXT(HWND hwnd, const char * val)
 {
     wchar_t text_wchar[0xff];
     size_t length = strlen(val);
@@ -60,14 +69,14 @@ void SetEditBoxTXT(HWND hwnd, const char * val)
     SendMessage(hwnd, (UINT)WM_SETTEXT, (WPARAM)0, (LPARAM)text_wchar);
 }
 
-void ShoWErrorControls()
+static void ShoWErrorControls()
 {
     ShowWindow(hwndEditLastErrStr, SW_SHOW);
     ShowWindow(hwndEditLastErr, SW_SHOW);
     ShowWindow(hwndEditLastErrLbl, SW_SHOW);
 }
 
-void SetLastErr(const char * err, int errNo)
+static void SetLastErr(const char * err, int errNo)
 {
     SetEditBoxINT(hwndEditLastErr, errNo);
     if (err != NULL)
@@ -75,7 +84,7 @@ void SetLastErr(const char * err, int errNo)
     ShoWErrorControls();
 }
 
-void SendMIDIShortMessage(HWND hwnd, u_int note)
+static void SendMIDIShortMessage(HWND hwnd, u_int note)
 {
     if (handMIDIOut != 0)
     {
@@ -86,7 +95,7 @@ void SendMIDIShortMessage(HWND hwnd, u_int note)
             MB_OK);
 }
 
-void SendMIDILongMessage(HWND hwnd, byte* buf, int bufLen)
+static void SendMIDILongMessage(HWND hwnd, byte* buf, int bufLen)
 {
     MIDIHDR     midiHdr;
     UINT        err;
@@ -127,16 +136,117 @@ void SendMIDILongMessage(HWND hwnd, byte* buf, int bufLen)
         MessageBox(hwnd, TEXT("MIDI not started!"), TEXT("OOPS!"), MB_OK);
 }
 
-void SetMT32_LCD(HWND hwnd, char * MT32Message)
+
+static void GetMidiCloseError(int errorNo, char buf[], size_t bufLen)
 {
-    byte buf[] = 
+    char tmp[30];
+    switch (errorNo)
+    {
+    case MIDIERR_STILLPLAYING:
+        strcat_s(buf, bufLen, "Buffers are still in the queue.");
+        break;
+    case MMSYSERR_INVALHANDLE:
+        strcat_s(buf, bufLen, "The specified device handle is invalid.");
+        break;
+    case MMSYSERR_NOMEM:
+        strcat_s(buf, bufLen, "The system is unable to allocate or lock memory.");
+        break;
+    default:
+        sprintf_s(tmp, "Unknown error #%d", errorNo);
+        strcat_s(buf, bufLen, tmp);
+        break;
+    }
+}
+
+static bool CloseMIDIOutDevice(HWND hwnd)
+{
+    char buf[100] = "CloseMIDIOutDevice() --> ";
+    if (handMIDIOut != 0)
+    {
+        int result = midiOutClose(handMIDIOut);
+        if (result == MMSYSERR_NOERROR)
+            handMIDIOut = 0;
+        else
+        {
+            GetMidiCloseError(result, buf, sizeof(buf));
+            MessageBoxA(hwnd, buf, "ERROR:", MB_OK);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool CloseMIDIInDevice(HWND hwnd)
+{
+    char buf[100] = "CloseMIDIInDevice() --> ";
+    if (handMIDIIn != 0)
+    {
+        bAddBuffer = false;
+        int result = midiInReset(handMIDIIn);
+        //result = midiInUnprepareHeader(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
+        //while ((result = midiInClose(handMIDIIn)) == MIDIERR_STILLPLAYING) Sleep(0);
+        result = midiInClose(handMIDIIn);
+        if (result == MMSYSERR_NOERROR)
+            handMIDIIn = 0;
+        else
+        {
+            GetMidiCloseError(result, buf, sizeof(buf));
+            MessageBoxA(hwnd, buf, "ERROR:", MB_OK);
+            return false;
+        }
+    }
+    return true;
+}
+
+static void _CloseMIDIDevice(HWND hwnd)
+{
+    CloseMIDIOutDevice(hwnd);
+    CloseMIDIInDevice(hwnd);
+}
+
+static int udpsock_client_connect(char* ipAddr, int port)
+{
+    SOCKET sock = 0;
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+    {
+        SetLastErr("udpsock_client_connect", errno);
+        return INVALID_SOCKET;
+    }
+    client_addr.sin_family = AF_INET;
+    client_addr.sin_port = htons(port);
+    //server_addr.sin_addr.s_addr = inet_addr(ipAddr);
+    inet_pton(AF_INET, ipAddr, &client_addr.sin_addr);
+    return sock;
+}
+
+static int udpsock_client_write(int sock, byte* buf, int bufLen)
+{
+    int result = 0;
+    if (clientSocket != INVALID_SOCKET)
+    {
+        result = sendto(sock,
+            (const char*)buf,
+            bufLen,
+            0, //MSG_CONFIRM,
+            (const struct sockaddr*)&client_addr,
+            sizeof(client_addr));
+        if (result < 0)
+            SetLastErr("udpsock_client_write", errno);
+    }
+    //SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
+    return result;
+}
+
+static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
+{
+    byte buf[] =
     { 0xF0, 0x41, 0x10, 0x16, 0x12, 0x20, 0x00, 0x00,
                   0,0,0,0,0, //sysex character data
                   0,0,0,0,0, // "
                   0,0,0,0,0, // "
                   0,0,0,0,0, // "
                   0x00, /* checksum placedholder */
-                  0xF7  /* end of sysex */ 
+                  0xF7  /* end of sysex */
     };
     int checksum = 0;
     int MT32MessageIndex = 0;
@@ -154,57 +264,19 @@ void SetMT32_LCD(HWND hwnd, char * MT32Message)
     }
     checksum = 128 - checksum % 128;
     buf[sizeof(buf) - 2] = (byte)(checksum);
-    SendMIDILongMessage(hwnd, buf, sizeof(buf));
-}
- 
- void CloseMIDIDevice()
- {
-     if (handMIDIOut != 0)
-     {
-         midiOutClose(handMIDIOut);
-         handMIDIOut = 0;
-         midiInClose(handMIDIIn);
-         handMIDIIn = 0;
-     }
+    if (!client)
+        SendMIDILongMessage(hwnd, buf, sizeof(buf));
+    else
+        udpsock_client_write(clientSocket, buf, sizeof(buf));
 }
 
-int udpsock_client_connect(char* ipAddr, int port)
-{
-    SOCKET sock = 0;
-    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
-    {
-        SetLastErr("udpsock_client_connect", errno);
-        return INVALID_SOCKET;
-    }
-    client_addr.sin_family = AF_INET;
-    client_addr.sin_port = htons(port);
-    //server_addr.sin_addr.s_addr = inet_addr(ipAddr);
-    inet_pton(AF_INET, ipAddr, &client_addr.sin_addr);
-    return sock;
-}
-
-int udpsock_client_write(int sock, byte* buf, int bufLen)
-{
-    int result = 0;
-    if (clientSocket != INVALID_SOCKET)
-    {
-        result = sendto(sock,
-            (const char*)buf,
-            bufLen,
-            0, //MSG_CONFIRM,
-            (const struct sockaddr*)&client_addr,
-            sizeof(client_addr));
-        if (result < 0)
-            SetLastErr("udpsock_client_write", errno);
-    }
-    SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
-    return result;
-}
-
-void CALLBACK MIDIInCallback(HMIDIIN handle, UINT uMsg, DWORD dwInstance, DWORD dwParam1, DWORD dwParam2)
+static void CALLBACK MIDIInCallback(HMIDIIN handle, UINT uMsg, DWORD dwInstance, DWORD dwParam1, DWORD dwParam2)
 {
     byte shortBuf[3];
+    LPMIDIHDR hdr;
+    MMRESULT result;
     //SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
+
     switch (uMsg)
     {
 
@@ -222,31 +294,195 @@ void CALLBACK MIDIInCallback(HMIDIIN handle, UINT uMsg, DWORD dwInstance, DWORD 
         break;
 
     case MIM_LONGDATA:
+        hdr = (LPMIDIHDR)dwParam1;
+        udpsock_client_write(clientSocket, (unsigned char*)(hdr->lpData), hdr->dwBytesRecorded);
+        if(bAddBuffer)
+            result = midiInAddBuffer(handle, hdr, sizeof(MIDIHDR));
+        SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
         break;
 
     case MIM_ERROR:
         break;
+
     case MIM_LONGERROR:
+        break;
+
+    case MIM_MOREDATA:
         break;
     }
 }
 
-void OpenMIDIDevice(HWND hwnd)
+static void GetMidiInOpenError(int errorNo, char buf[], size_t bufLen)
 {
-    int result;
-    CloseMIDIDevice();
-    int iMIDIDev = (int)SendMessage(hwndComboBoxMIDIDevice, CB_GETCURSEL, 0, 0);
-    if (iMIDIDev != -1)
+    char tmp[30];
+    switch (errorNo)
     {
-        result = midiInOpen(&handMIDIIn, iMIDIDev, (DWORD)MIDIInCallback, 0, CALLBACK_FUNCTION);
-        result = midiOutOpen(&handMIDIOut, iMIDIDev, 0, 0, 0);
-        SetMT32_LCD(hwnd, MT32_Message);
+    case MMSYSERR_ALLOCATED:
+        strcat_s(buf, bufLen, "The specified resource is already allocated.");
+        break;
+    case MMSYSERR_BADDEVICEID:
+        strcat_s(buf, bufLen, "The specified device identifier is out of range.");
+        break;
+    case MMSYSERR_INVALFLAG:
+        strcat_s(buf, bufLen, "The flags specified by dwFlags are invalid.");
+        break;
+    case MMSYSERR_INVALPARAM:
+        strcat_s(buf, bufLen, "The specified pointer or structure is invalid.");
+        break;
+    case MMSYSERR_NOMEM:
+        strcat_s(buf, bufLen, "The system is unable to allocate or lock memory.");
+        break;
+    default:
+        sprintf_s(tmp, "Unknown error #%d", errorNo);
+        strcat_s(buf, bufLen, tmp);
+        break;
+    }
+}
+
+static void GetMidiOutCloseError(int errorNo, char buf[], size_t bufLen)
+{
+    char tmp[30];
+    switch (errorNo)
+    {
+    default:
+        sprintf_s(tmp, "Unknown error #%d", errorNo);
+        strcat_s(buf, bufLen, tmp);
+        break;
+    }
+}
+
+static void GetMidiOutOpenError(int errorNo, char buf[], size_t bufLen)
+{
+    char tmp[30];
+    switch (errorNo)
+    {
+    case MIDIERR_NODEVICE:
+        strcat_s(buf, bufLen, "No MIDI port was found.This error occurs only when the mapper is opened.");
+        break;
+    case MMSYSERR_ALLOCATED:
+        strcat_s(buf, bufLen, "The specified resource is already allocated.");
+        break;
+    case MMSYSERR_BADDEVICEID:
+        strcat_s(buf, bufLen, "The specified device identifier is out of range.");
+        break;
+    case MMSYSERR_INVALPARAM:
+        strcat_s(buf, bufLen, "The specified pointer or structure is invalid.");
+        break;
+    case MMSYSERR_NOMEM:
+        strcat_s(buf, bufLen, "The system is unable to allocate or lock memory.");
+        break;
+    default:
+        sprintf_s(tmp, "Unknown error #%d", errorNo);
+        strcat_s(buf, bufLen, tmp);
+        break;
+    }
+}
+
+static void OpenMIDIOutDevice(HWND hwnd)
+{
+    char buf[100];
+    int result;
+    CloseMIDIOutDevice(hwnd);
+    int iMIDIOutDev = (int)SendMessage(hwndComboBoxMIDIOutDevice, CB_GETCURSEL, 0, 0);
+    if (iMIDIOutDev != -1)
+    {
+        result = midiOutOpen(&handMIDIOut, iMIDIOutDev, 0, 0, 0);
+        if (result != MMSYSERR_NOERROR)
+        {
+            sprintf_s(buf, "midiInOpen(%d) --> ", iMIDIOutDev);
+            GetMidiOutOpenError(result, buf, sizeof(buf));
+            MessageBoxA(hwnd, buf, "ERROR:", MB_OK);
+        }
+        else
+            SetMT32_LCD(hwnd, MT32_Message);
     }
     else
         MessageBox(hwnd, TEXT("No MIDI device selected!"), TEXT("OOPS!"), MB_OK);
 }
 
-DWORD WINAPI UDPinThread(LPVOID lpParameter)
+static void OpenMIDIInDevice(HWND hwnd)
+{
+    char buf[100];
+    int result;
+    CloseMIDIInDevice(hwnd);
+    int iMIDIInDev = (int)SendMessage(hwndComboBoxMIDIInDevice, CB_GETCURSEL, 0, 0);
+    if (iMIDIInDev != -1)
+    {
+        result = midiInOpen(&handMIDIIn, iMIDIInDev, (DWORD)(void*)MIDIInCallback, 0, CALLBACK_FUNCTION);
+        if (result != MMSYSERR_NOERROR)
+        {
+            sprintf_s(buf, "midiInOpen(%d) --> ", iMIDIInDev);
+            GetMidiInOpenError(result, buf, sizeof(buf));
+            MessageBoxA(hwnd, buf, "ERROR:", MB_OK);
+        }
+        else
+        {
+            bAddBuffer = true;
+            midiInPrepareHeader(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
+            midiInAddBuffer(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
+            midiInStart(handMIDIIn);
+        }
+    }
+    else
+        MessageBox(hwnd, TEXT("No MIDI device selected!"), TEXT("OOPS!"), MB_OK);
+}
+
+static bool isValidIpAddress(char* ipAddress)
+{
+    struct sockaddr_in sa;
+    int result = inet_pton(AF_INET, ipAddress, &(sa.sin_addr));
+    return result != 0;
+}
+
+static bool FindClientAndConnect()
+{
+    char iniFileName[MAX_PATH + 1];
+    TCHAR iniFileNameTC[MAX_PATH + 1];
+    bool res;
+    if ((GetModuleFileNameA(0, iniFileName, MAX_PATH + 1) != 0) && (GetModuleFileName(0, iniFileNameTC, MAX_PATH + 1) != 0))
+    {
+        size_t len = strlen(iniFileName) - 1;
+     /* iniFileNameTC[len] = */ iniFileName[len--] = 'I';
+     /* iniFileNameTC[len] = */ iniFileName[len--] = 'N';
+     /* iniFileNameTC[len] = */ iniFileName[len--] = 'I';
+     /* TCHAR tmp[sizeof(ClientDeviceName)];
+        size_t output_size;
+       
+        res = GetPrivateProfileString(_T("UDPMIDI"), _T("CLIENT"), _T(defaultClient), tmp, sizeof(tmp), iniFileNameTC);
+        if (res)
+            wcstombs_s(&output_size, ClientDeviceName, tmp, wcslen(tmp) + 1);
+        else
+      */    res = GetPrivateProfileStringA("UDPMIDI", "CLIENT", defaultClientDeviceName, ClientDeviceName, sizeof(ClientDeviceName), iniFileName);
+    }
+
+    struct addrinfo* addrInfoRes = NULL;
+    char strIPAddr[INET_ADDRSTRLEN];
+    if (isValidIpAddress(ClientDeviceName))
+    {
+        if (clientSocket != INVALID_SOCKET)
+            closesocket(clientSocket);
+        clientSocket = udpsock_client_connect(ClientDeviceName, 1999);
+        SetEditBoxTXT(hwndEditSenderIP, ClientDeviceName);
+        return true;
+    }
+    else
+    {
+        getaddrinfo(ClientDeviceName, "1999", 0, &addrInfoRes);
+        if (addrInfoRes)
+        {
+            struct sockaddr_in* p = (struct sockaddr_in*)addrInfoRes->ai_addr;
+            printf("%s\n", inet_ntop(AF_INET, &p->sin_addr, strIPAddr, sizeof(strIPAddr)));
+            if (clientSocket != INVALID_SOCKET)
+                closesocket(clientSocket);
+            clientSocket = udpsock_client_connect(strIPAddr, 1999);
+            SetEditBoxTXT(hwndEditSenderIP, strIPAddr);
+            return true;
+        }
+    }
+    return false;
+}
+
+static DWORD WINAPI UDPinThread(LPVOID lpParameter)
 {
     HWND& hwnd = *((HWND*)lpParameter);
     byte buf[1024];
@@ -274,7 +510,7 @@ DWORD WINAPI UDPinThread(LPVOID lpParameter)
     return 0;
 }
 
-BOOL InitUDPListener(HWND hDlg)
+static BOOL InitUDPListener(HWND hDlg)
 {
     if (listenerSocket == INVALID_SOCKET)
     {    
@@ -326,7 +562,7 @@ BOOL InitUDPListener(HWND hDlg)
     return TRUE;
 }
 
-void CloseUDPListner()
+static void CloseUDPListner()
 {
     if (listenerSocket != INVALID_SOCKET)
     {
@@ -338,7 +574,7 @@ void CloseUDPListner()
     }
 }
 
-void AllNotesOff(HWND hwnd)
+static void AllNotesOff(HWND hwnd)
 {
     return;
     for (byte channel = 0xb0; channel <= 0xbf; channel++)
@@ -348,7 +584,7 @@ void AllNotesOff(HWND hwnd)
     }
 }
 
-void VerticalGradient(HDC hDC, const RECT & rect, COLORREF rgbTop, COLORREF rgbBottom)
+static void VerticalGradient(HDC hDC, const RECT & rect, COLORREF rgbTop, COLORREF rgbBottom)
 {
     GRADIENT_RECT gradientRect = { 0, 1 };
     TRIVERTEX triVertext[2] = {
@@ -367,7 +603,7 @@ void VerticalGradient(HDC hDC, const RECT & rect, COLORREF rgbTop, COLORREF rgbB
     GradientFill(hDC, triVertext, 2, &gradientRect, 1, GRADIENT_FILL_RECT_V);
 }
 
-INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
+static INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     HDC hdc;
     RECT rect;
@@ -388,7 +624,10 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
             SetEditBoxINT(hwndEditPacketsRX, 0);
             SetEditBoxINT(hwndEditPacketsTX, 0);
             CloseUDPListner();
-            OpenMIDIDevice(hDlg);
+            CloseMIDIInDevice(hDlg);
+            OpenMIDIInDevice(hDlg);
+            CloseMIDIOutDevice(hDlg);
+            OpenMIDIOutDevice(hDlg);
             InitUDPListener(hDlg);
             AllNotesOff(hDlg);
             break;
@@ -403,16 +642,27 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
             SendMIDIShortMessage(hDlg, 0x00403C90);
             MessageBox(hDlg, TEXT(ABOUT_DLG_TXT), TEXT("About"), MB_OK);
             break;
-        case IDC_COMBO_MIDI_DEV:
+        case IDC_COMBO_MIDI_OUT_DEV:
             switch (HIWORD(wParam))
             {
             case CBN_SELCHANGE:
-                int iMIDIDev = (int)SendMessage(hwndComboBoxMIDIDevice, CB_GETCURSEL, 0, 0);
-                //SetLastErr("Open MIDI dev -->", iMIDIDev);
-                CloseUDPListner();
-                OpenMIDIDevice(hDlg);
-                InitUDPListener(hDlg);
+                CloseMIDIOutDevice(hDlg);
+                int iMIDIOutDev = (int)SendMessage(hwndComboBoxMIDIOutDevice, CB_GETCURSEL, 0, 0);
+                OpenMIDIOutDevice(hDlg);
             }
+            break;
+        case IDC_COMBO_MIDI_IN_DEV:
+            switch (HIWORD(wParam))
+            {
+            case CBN_SELCHANGE:
+                CloseMIDIInDevice(hDlg);
+                int iMIDIInDev = (int)SendMessage(hwndComboBoxMIDIInDevice, CB_GETCURSEL, 0, 0);
+                OpenMIDIInDevice(hDlg);
+            }
+            break;
+        case IDC_BUTTON_PI:
+            if(FindClientAndConnect())
+                SetMT32_LCD(hDlg, MT32_Message, true);
             break;
         }
         break;
@@ -435,7 +685,7 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
         GetClientRect(hDlg, &rect);
         VerticalGradient(hdc, rect, 0xff0000, 0x99999999);
         //TextOut(hdc, 0, 0, TEXT("BBond007"), 15);
-        DrawIconEx(hdc, 100, 60, hIcon, 72, 78, 0, NULL, DI_NORMAL);
+        DrawIconEx(hdc, 100, 85, hIcon, 72, 78, 0, NULL, DI_NORMAL);
         EndPaint(hDlg, &ps);
         break;
 
@@ -471,28 +721,53 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     BOOL ret;
     InitCommonControls();
     WSADATA wsaData;
+
     hDlg = CreateDialogParam(hInstance, MAKEINTRESOURCE(IDD_DIALOG1), 0, DialogProc, 0);
-    hwndComboBoxMIDIDevice = GetDlgItem(hDlg, IDC_COMBO_MIDI_DEV);
-    hwndEditPacketsRX      = GetDlgItem(hDlg, IDC_EDIT_PACKETS_RX);
-    hwndEditPacketsTX      = GetDlgItem(hDlg, IDC_EDIT_PACKETS_TX);
-    hwndEditUDPPort        = GetDlgItem(hDlg, IDC_EDIT_UDP_PORT);
-    hwndEditLastErr        = GetDlgItem(hDlg, IDC_EDIT_LAST_ERR);
-    hwndEditLastErrStr     = GetDlgItem(hDlg, IDC_EDIT_LAST_ERR_STR);
-    hwndEditLastErrLbl     = GetDlgItem(hDlg, 1012);// IDC_LABEL_ERROR); why is that an error?
-    hwndEditSenderIP       = GetDlgItem(hDlg, IDC_EDIT_IP_ADDR);
-    int numDevs = midiOutGetNumDevs();
-    if (numDevs > 0)
+    hwndComboBoxMIDIOutDevice = GetDlgItem(hDlg, IDC_COMBO_MIDI_OUT_DEV);
+    hwndComboBoxMIDIInDevice  = GetDlgItem(hDlg, IDC_COMBO_MIDI_IN_DEV);
+    hwndEditPacketsRX         = GetDlgItem(hDlg, IDC_EDIT_PACKETS_RX);
+    hwndEditPacketsTX         = GetDlgItem(hDlg, IDC_EDIT_PACKETS_TX);
+    hwndEditUDPPort           = GetDlgItem(hDlg, IDC_EDIT_UDP_PORT);
+    hwndEditLastErr           = GetDlgItem(hDlg, IDC_EDIT_LAST_ERR);
+    hwndEditLastErrStr        = GetDlgItem(hDlg, IDC_EDIT_LAST_ERR_STR);
+    hwndEditLastErrLbl        = GetDlgItem(hDlg, IDC_LABEL_ERROR); 
+    hwndEditSenderIP          = GetDlgItem(hDlg, IDC_EDIT_IP_ADDR);  
+    midiInHdr.lpData          = (LPSTR)&SysXBuffer[0];
+    midiInHdr.dwBufferLength  = sizeof(SysXBuffer);
+
+    wchar_t* wcstring = new wchar_t[sizeof(MT32_Message)];
+    size_t convertedChars = 0;
+    mbstowcs_s(&convertedChars, wcstring,sizeof(MT32_Message), MT32_Message, _TRUNCATE);
+    SendMessage(hDlg, (UINT)WM_SETTEXT, (WPARAM)0, (LPARAM)wcstring);
+
+    int numOutDevs = midiOutGetNumDevs();
+    if (numOutDevs > 0)
     {
-        for (int i = 0; i < numDevs; i++)
+        for (int i = 0; i < numOutDevs; i++)
         {
             MIDIOUTCAPS myCaps;
             int result2 = midiOutGetDevCaps(i, &myCaps, sizeof(myCaps));
-            SendMessage(hwndComboBoxMIDIDevice, (UINT)CB_ADDSTRING, (WPARAM)0, (LPARAM)myCaps.szPname);
+            SendMessage(hwndComboBoxMIDIOutDevice, (UINT)CB_ADDSTRING, (WPARAM)0, (LPARAM)myCaps.szPname);
         }
-        SendMessage(hwndComboBoxMIDIDevice, (UINT)CB_SETCURSEL, (WPARAM)0, (LPARAM)0);
-        OpenMIDIDevice(hDlg);
+        SendMessage(hwndComboBoxMIDIOutDevice, (UINT)CB_SETCURSEL, (WPARAM)0, (LPARAM)0);
+        OpenMIDIOutDevice(hDlg);
         AllNotesOff(hDlg);
     }
+
+    int numInDevs = midiInGetNumDevs();
+    if (numInDevs > 0)
+    {
+        for (int i = 0; i < numInDevs; i++)
+        {
+            MIDIINCAPS myCaps;
+            int result2 = midiInGetDevCaps(i, &myCaps, sizeof(myCaps));
+            SendMessage(hwndComboBoxMIDIInDevice, (UINT)CB_ADDSTRING, (WPARAM)0, (LPARAM)myCaps.szPname);
+        }
+        SendMessage(hwndComboBoxMIDIInDevice, (UINT)CB_SETCURSEL, (WPARAM)0, (LPARAM)0);
+        OpenMIDIInDevice(hDlg);
+        //AllNotesOff(hDlg);
+    }
+
     SetEditBoxINT(hwndEditPacketsRX, 0);
     SetEditBoxINT(hwndEditPacketsTX, 0);
     SendMessage(hwndEditUDPPort, (UINT)WM_SETTEXT, (WPARAM)0, (LPARAM)TEXT("1999"));
@@ -537,7 +812,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     }
     //Cleanup trey icon...
     Shell_NotifyIcon(NIM_DELETE, &niData);
-    CloseMIDIDevice();
+    CloseMIDIOutDevice(hDlg);
+    CloseMIDIInDevice(hDlg);
     CloseUDPListner();
     WSACleanup();
     return 0;
