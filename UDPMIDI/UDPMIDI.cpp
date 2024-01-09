@@ -1,5 +1,6 @@
 //#define USE_ASYNC_SELECT
 //#define _WINSOCK_DEPRECATED_NO_WARNINGS TRUE
+//#define DEBUG_LOGGING
 #include <Winsock2.h>
 #include <WS2tcpip.h>
 #include <Windows.h>
@@ -16,7 +17,7 @@
 #pragma comment(lib, "Winmm.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "msimg32.lib")
-#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\n2.1 release : 12/28/2023\n\nBinaryBond007@gmail.com"
+#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\n2.2 release : 01/09/2024\n\nBinaryBond007@gmail.com"
 #define WM_UDPSOCK_IN (WM_USER + 1)
 #define WM_SHELL_ICO  (WM_USER + 2)
 
@@ -42,13 +43,24 @@ static HANDLE        handUDPinThread           = 0;
 static SOCKET        listenerSocket            = INVALID_SOCKET;
 static SOCKET        clientSocket              = INVALID_SOCKET;
 static int           SenderAddrSize            = sizeof(SenderAddr);
-static bool          bAddBuffer                = true;
-static char          MT32_Message[]            = "<-UDPMIDI  VER 2.1->";
+//static bool          bAddBuffer                = true;
+static char          MT32_Message[]            = "<-UDPMIDI  VER 2.2->";
 static char          defaultClientDeviceName[] = "mt32-pi";
 static char          ClientDeviceName[30];
 static MIDIHDR	     midiInHdr;
 static unsigned char SysXBuffer[2048];
+#ifdef DEBUG_LOGGING
+static FILE*         logFile                   = 0;
 
+static void debugDumpBuf(byte* buf, size_t bufLen)
+{
+    for (int i = 0; i < bufLen; i++)
+        if (i == bufLen - 1)
+            fprintf(logFile, "%02x\r\n", *buf++);
+        else
+            fprintf(logFile, "%02x:", *buf++);
+}
+#endif
 
 static void SetEditBoxINT(HWND hwnd, int val)
 {
@@ -95,7 +107,7 @@ static void SendMIDIShortMessage(HWND hwnd, u_int note)
             MB_OK);
 }
 
-static void SendMIDILongMessage(HWND hwnd, byte* buf, int bufLen)
+static void SendMIDILongMessage(HWND hwnd, byte* buf, size_t bufLen)
 {
     MIDIHDR     midiHdr;
     UINT        err;
@@ -181,7 +193,7 @@ static bool CloseMIDIInDevice(HWND hwnd)
     char buf[100] = "CloseMIDIInDevice() --> ";
     if (handMIDIIn != 0)
     {
-        bAddBuffer = false;
+        //bAddBuffer = false;
         int result = midiInReset(handMIDIIn);
         //result = midiInUnprepareHeader(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
         //while ((result = midiInClose(handMIDIIn)) == MIDIERR_STILLPLAYING) Sleep(0);
@@ -219,7 +231,7 @@ static int udpsock_client_connect(char* ipAddr, int port)
     return sock;
 }
 
-static int udpsock_client_write(int sock, byte* buf, int bufLen)
+static int udpsock_client_write(int sock, byte* buf, size_t bufLen)
 {
     int result = 0;
     if (clientSocket != INVALID_SOCKET)
@@ -250,7 +262,7 @@ static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
     };
     int checksum = 0;
     int MT32MessageIndex = 0;
-    int MT32MessageLength = strlen(MT32Message);
+    size_t MT32MessageLength = strlen(MT32Message);
     for (int bufIndex = 5; bufIndex < sizeof(buf) - 2; bufIndex++)
     {
         if (bufIndex > 7)
@@ -270,13 +282,39 @@ static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
         udpsock_client_write(clientSocket, buf, sizeof(buf));
 }
 
+size_t GetMidiMessageLength(byte status_byte)
+{
+    if (status_byte < 0x80)
+        return 0;
+    if (0x80 <= status_byte && status_byte <= 0xbf)
+        return 3;
+    if (0xc0 <= status_byte && status_byte <= 0xdf)
+        return 2;
+    if (0xe0 <= status_byte && status_byte <= 0xef)
+        return 3;
+    if (status_byte == 0xf0)
+        return 0;
+    if (status_byte == 0xf1)
+        return 2;
+    if (status_byte == 0xf2)
+        return 3;
+    if (status_byte == 0xf3)
+        return 2;
+    if (0xf4 <= status_byte && status_byte <= 0xf6)
+        return 1;
+    if (status_byte == 0xf7)
+        return 0;
+    // 0xf8 <= status_byte && status_byte <= 0xff
+    return 1;
+}
+
 static void CALLBACK MIDIInCallback(HMIDIIN handle, UINT uMsg, DWORD dwInstance, DWORD dwParam1, DWORD dwParam2)
 {
     byte shortBuf[3];
+    size_t shortBufLen;
     LPMIDIHDR hdr;
-    MMRESULT result;
-    //SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
-
+    MMRESULT result; 
+ 
     switch (uMsg)
     {
 
@@ -290,14 +328,25 @@ static void CALLBACK MIDIInCallback(HMIDIIN handle, UINT uMsg, DWORD dwInstance,
         shortBuf[0] = dwParam1 & 0xFF;
         shortBuf[1] = (dwParam1 >> 8) & 0xFF;
         shortBuf[2] = (dwParam1 >> 16) & 0xFF;
-        udpsock_client_write(clientSocket, shortBuf, 3);
+        shortBufLen = GetMidiMessageLength(shortBuf[0]);
+        if (shortBufLen)
+        {
+            udpsock_client_write(clientSocket, shortBuf, shortBufLen);
+            SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
+        }
         break;
 
     case MIM_LONGDATA:
         hdr = (LPMIDIHDR)dwParam1;
-        udpsock_client_write(clientSocket, (unsigned char*)(hdr->lpData), hdr->dwBytesRecorded);
-        if(bAddBuffer)
+        if (hdr->dwBytesRecorded > 0)
+        {
+            udpsock_client_write(clientSocket, (byte*)hdr->lpData, hdr->dwBytesRecorded);
+            result = midiInPrepareHeader(handle, hdr, sizeof(MIDIHDR));
             result = midiInAddBuffer(handle, hdr, sizeof(MIDIHDR));
+        }
+       /* else
+            if (hdr && (hdr->dwFlags & MHDR_PREPARED) == MHDR_PREPARED)
+                result = midiInUnprepareHeader(handle, hdr, sizeof(MIDIHDR));*/
         SetEditBoxINT(hwndEditPacketsTX, ++TXCount);
         break;
 
@@ -417,7 +466,7 @@ static void OpenMIDIInDevice(HWND hwnd)
         }
         else
         {
-            bAddBuffer = true;
+            //bAddBuffer = true;
             midiInPrepareHeader(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
             midiInAddBuffer(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
             midiInStart(handMIDIIn);
@@ -486,13 +535,14 @@ static DWORD WINAPI UDPinThread(LPVOID lpParameter)
 {
     HWND& hwnd = *((HWND*)lpParameter);
     byte buf[1024];
-    int bufLen;
+    size_t bufLen;
     while (listenerSocket != INVALID_SOCKET)
     {
         //bufLen = recv(listenerSocket, (char*)buf, sizeof(buf), 0);
         bufLen = recvfrom(listenerSocket, (char*)buf, sizeof(buf), 0, (SOCKADDR*)&SenderAddr, &SenderAddrSize);   //recvfrom gives us IP addr so we can send stuff back.  
         if (bufLen > 0)
         {
+            //debugDumpBuf(buf, bufLen);
             SendMIDILongMessage(hwnd, buf, bufLen);
             SetEditBoxINT(hwndEditPacketsRX, ++RXCount);
             if (memcmp(&SenderAddr, &OLDSenderAddr, SenderAddrSize) != 0)
@@ -610,7 +660,7 @@ static INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
     PAINTSTRUCT ps;
 #ifdef USE_ASYNC_SELECT
     byte buf[1024];
-    int bufLen;
+    size_t bufLen;
 #endif
 
     switch (uMsg)
@@ -734,6 +784,18 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     hwndEditSenderIP          = GetDlgItem(hDlg, IDC_EDIT_IP_ADDR);  
     midiInHdr.lpData          = (LPSTR)&SysXBuffer[0];
     midiInHdr.dwBufferLength  = sizeof(SysXBuffer);
+    
+#ifdef DEBUG_LOGGING
+    char logFileName[MAX_PATH + 1];   
+    if (GetModuleFileNameA(0, logFileName, MAX_PATH + 1) != 0)
+    {
+        size_t len = strlen(logFileName) - 1;
+        logFileName[len--] = 'G';
+        logFileName[len--] = 'O';
+        logFileName[len--] = 'L';
+        fopen_s(&logFile, logFileName, "w");
+    }
+#endif
 
     wchar_t* wcstring = new wchar_t[sizeof(MT32_Message)];
     size_t convertedChars = 0;
@@ -816,5 +878,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
     CloseMIDIInDevice(hDlg);
     CloseUDPListner();
     WSACleanup();
+#ifdef DEBUG_LOGGING
+    fclose(logFile);
+#endif
     return 0;
 }
