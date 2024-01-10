@@ -17,7 +17,7 @@
 #pragma comment(lib, "Winmm.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "msimg32.lib")
-#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\n2.2 release : 01/09/2024\n\nBinaryBond007@gmail.com"
+#define ABOUT_DLG_TXT "UDPMIDI c++ version\n\n2.2 release : 01/10/2024\n\nBinaryBond007@gmail.com"
 #define WM_UDPSOCK_IN (WM_USER + 1)
 #define WM_SHELL_ICO  (WM_USER + 2)
 
@@ -249,6 +249,7 @@ static int udpsock_client_write(int sock, byte* buf, size_t bufLen)
     return result;
 }
 
+#ifdef USE_SET_MT32_LCD_OLD
 static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
 {
     byte buf[] =
@@ -260,7 +261,7 @@ static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
                   0x00, /* checksum placedholder */
                   0xF7  /* end of sysex */
     };
-    int checksum = 0;
+    byte checksum = 0;
     int MT32MessageIndex = 0;
     size_t MT32MessageLength = strlen(MT32Message);
     for (int bufIndex = 5; bufIndex < sizeof(buf) - 2; bufIndex++)
@@ -281,6 +282,29 @@ static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
     else
         udpsock_client_write(clientSocket, buf, sizeof(buf));
 }
+#else
+static void SetMT32_LCD(HWND hwnd, char* MT32Message, bool client = false)
+{
+
+    byte hdr[] = { 0xF0, 0x41, 0x10, 0x16, 0x12, 0x20, 0x00, 0x00 };
+    byte buf[255];
+    byte iBuf = sizeof(hdr);
+    memcpy(buf, hdr, sizeof(hdr)); 
+    byte checksum = 0x20;
+    for (int i = 0; i < strlen(MT32Message); i++)
+    {
+        checksum += MT32Message[i];
+        buf[iBuf++] = MT32Message[i];
+    } 
+    checksum = 128 - checksum % 128;
+    buf[iBuf++] = checksum;
+    buf[iBuf++] = 0xf7;
+    if (!client)
+        SendMIDILongMessage(hwnd, buf, iBuf);
+    else
+        udpsock_client_write(clientSocket, buf, iBuf);
+}
+#endif
 
 size_t GetMidiMessageLength(byte status_byte)
 {
