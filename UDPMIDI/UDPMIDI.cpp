@@ -641,10 +641,10 @@ static void CloseUDPListner()
     {
 #ifndef USE_ASYNC_SELECT
         CloseHandle(handUDPinThread);
-#endif
-        TerminateThread(handUDPinThread,0);
+#endif  
+        TerminateThread(handUDPinThread, 0);
         closesocket(listenerSocket);
-        listenerSocket = INVALID_SOCKET; 
+        listenerSocket = INVALID_SOCKET;   
     }
 }
 
@@ -695,6 +695,7 @@ static INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
         
         case IDC_BTN_RESET:
             RXCount = 0;
+            TXCount = 0;
             SetEditBoxINT(hwndEditPacketsRX, 0);
             SetEditBoxINT(hwndEditPacketsTX, 0);    
             CloseMIDIOutDevice(hDlg);
