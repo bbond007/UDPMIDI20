@@ -193,9 +193,8 @@ static bool CloseMIDIInDevice(HWND hwnd)
     char buf[100] = "CloseMIDIInDevice() --> ";
     if (handMIDIIn != 0)
     {
-        //bAddBuffer = false;
         int result = midiInReset(handMIDIIn);
-        //result = midiInUnprepareHeader(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
+        result = midiInUnprepareHeader(handMIDIIn, &midiInHdr, sizeof(MIDIHDR));
         //while ((result = midiInClose(handMIDIIn)) == MIDIERR_STILLPLAYING) Sleep(0);
         result = midiInClose(handMIDIIn);
         if (result == MMSYSERR_NOERROR)
@@ -643,6 +642,7 @@ static void CloseUDPListner()
 #ifndef USE_ASYNC_SELECT
         CloseHandle(handUDPinThread);
 #endif
+        TerminateThread(handUDPinThread,0);
         closesocket(listenerSocket);
         listenerSocket = INVALID_SOCKET; 
     }
@@ -696,13 +696,13 @@ static INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM l
         case IDC_BTN_RESET:
             RXCount = 0;
             SetEditBoxINT(hwndEditPacketsRX, 0);
-            SetEditBoxINT(hwndEditPacketsTX, 0);
-            CloseUDPListner();
-            CloseMIDIInDevice(hDlg);
-            OpenMIDIInDevice(hDlg);
+            SetEditBoxINT(hwndEditPacketsTX, 0);    
             CloseMIDIOutDevice(hDlg);
             OpenMIDIOutDevice(hDlg);
-            InitUDPListener(hDlg);
+            CloseMIDIInDevice(hDlg);
+            OpenMIDIInDevice(hDlg);
+            //CloseUDPListner();          
+            //InitUDPListener(hDlg);
             AllNotesOff(hDlg);
             break;
         case IDC_BTN_HIDE:
